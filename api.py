@@ -1,10 +1,12 @@
 import os
 import tempfile
-from typing import Optional
-from urllib.parse import parse_qs, urlparse, unquote
+from datetime import date, datetime
+from typing import Any, Optional
+from urllib.parse import parse_qs, unquote, urlparse
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from dejavu import Dejavu
 from dejavu.logic.recognizer.file_recognizer import FileRecognizer
@@ -94,17 +96,23 @@ def _write_upload(upload: UploadFile) -> str:
     return path
 
 
-def _serialize_songs(songs):
-    cleaned = []
-    for song in songs or []:
-        item = {}
-        for key, value in song.items():
-            if isinstance(value, bytes):
-                item[key] = value.decode("utf-8", errors="ignore")
-            else:
-                item[key] = value
-        cleaned.append(item)
-    return cleaned
+def _json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, (str, bool, int, float)):
+        return value
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="ignore")
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(v) for v in value]
+    if hasattr(value, "item"):
+        try:
+            return _json_safe(value.item())
+        except Exception:
+            pass
+    return str(value)
 
 
 @app.get("/health")
@@ -115,7 +123,7 @@ def health():
 @app.get("/songs", dependencies=[Depends(require_api_key)])
 def list_songs():
     djv = get_dejavu()
-    return {"songs": _serialize_songs(djv.get_fingerprinted_songs())}
+    return {"songs": _json_safe(djv.get_fingerprinted_songs())}
 
 
 @app.post("/fingerprint", dependencies=[Depends(require_api_key)])
@@ -144,9 +152,7 @@ async def recognize_song(file: UploadFile = File(...)):
     try:
         djv = get_dejavu()
         result = djv.recognize(FileRecognizer, path)
-        if result and "results" in result:
-            result["results"] = _serialize_songs(result["results"])
-        return result
+        return JSONResponse(content=_json_safe(result or {}))
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:

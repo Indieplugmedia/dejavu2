@@ -26,7 +26,7 @@ class BaseRecognizer(object, metaclass=abc.ABCMeta):
         final_results = self.dejavu.align_matches(matches, dedup_hashes, len(hashes))
         align_time = time() - t
 
-        return final_results, np.sum(fingerprint_times), query_time, align_time
+        return final_results, float(np.sum(fingerprint_times)), float(query_time), float(align_time)
 
     @abc.abstractmethod
     def recognize(self) -> Dict[str, any]:
