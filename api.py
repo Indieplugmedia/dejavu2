@@ -38,7 +38,7 @@ def _db_config_from_env() -> dict:
             "database": (parsed.path or "/dejavu").lstrip("/") or "dejavu",
         }
         query = parse_qs(parsed.query)
-        sslmode = (query.get("sslmode") or [os.getenv("DB_SSLMODE", "require")])[0]
+        sslmode = (query.get("sslmode") or [os.getenv("DB_SSLMODE", "prefer")])[0]
         config["sslmode"] = sslmode
         return config
 
@@ -152,8 +152,3 @@ async def recognize_song(file: UploadFile = File(...)):
     finally:
         if os.path.exists(path):
             os.remove(path)
-
-
-@app.on_event("startup")
-def startup():
-    get_dejavu()

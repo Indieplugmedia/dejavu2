@@ -1,14 +1,17 @@
 import hashlib
+import os
 from operator import itemgetter
 from typing import List, Tuple
 
+os.environ.setdefault("MPLBACKEND", "Agg")
+
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.mlab as mlab
 import matplotlib.pyplot as plt
 import numpy as np
-from scipy.ndimage.filters import maximum_filter
-from scipy.ndimage.morphology import (binary_erosion,
-                                      generate_binary_structure,
-                                      iterate_structure)
+from scipy.ndimage import (binary_erosion, generate_binary_structure,
+                           iterate_structure, maximum_filter)
 
 from dejavu.config.settings import (CONNECTIVITY_MASK, DEFAULT_AMP_MIN,
                                     DEFAULT_FAN_VALUE, DEFAULT_FS,
