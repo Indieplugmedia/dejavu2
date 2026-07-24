@@ -138,7 +138,7 @@ class Dejavu:
                 self.limit,
                 song_name=song_name
             )
-            sid = self.db.insert_song(song_name, file_hash)
+            sid = self.db.insert_song(song_name, file_hash, len(hashes))
 
             self.db.insert_hashes(sid, hashes)
             self.db.set_song_fingerprinted(sid)
@@ -202,19 +202,23 @@ class Dejavu:
             nseconds = round(float(offset) / DEFAULT_FS * DEFAULT_WINDOW_SIZE * DEFAULT_OVERLAP_RATIO, 5)
             hashes_matched = dedup_hashes[song_id]
 
+            file_sha1 = song.get(FIELD_FILE_SHA1, None)
+            if isinstance(file_sha1, bytes):
+                file_sha1 = file_sha1.decode("utf-8", errors="ignore")
+            if isinstance(song_name, bytes):
+                song_name = song_name.decode("utf-8", errors="ignore")
+
             song = {
                 SONG_ID: song_id,
-                SONG_NAME: song_name.encode("utf8"),
+                SONG_NAME: song_name,
                 INPUT_HASHES: queried_hashes,
                 FINGERPRINTED_HASHES: song_hashes,
                 HASHES_MATCHED: hashes_matched,
-                # Percentage regarding hashes matched vs hashes from the input.
-                INPUT_CONFIDENCE: round(hashes_matched / queried_hashes, 2),
-                # Percentage regarding hashes matched vs hashes fingerprinted in the db.
-                FINGERPRINTED_CONFIDENCE: round(hashes_matched / song_hashes, 2),
+                INPUT_CONFIDENCE: round(hashes_matched / queried_hashes, 2) if queried_hashes else 0,
+                FINGERPRINTED_CONFIDENCE: round(hashes_matched / song_hashes, 2) if song_hashes else 0,
                 OFFSET: offset,
                 OFFSET_SECS: nseconds,
-                FIELD_FILE_SHA1: song.get(FIELD_FILE_SHA1, None).encode("utf8")
+                FIELD_FILE_SHA1: file_sha1
             }
 
             songs_result.append(song)

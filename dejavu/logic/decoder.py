@@ -65,34 +65,34 @@ def read(file_name: str, limit: int = None) -> Tuple[List[List[int]], int, str]:
     :param limit: number of seconds to limit.
     :return: tuple list of (channels, sample_rate, content_file_hash).
     """
-    # pydub does not support 24-bit wav files, use wavio when this occurs
     try:
         audiofile = AudioSegment.from_file(file_name)
 
         if limit:
             audiofile = audiofile[:limit * 1000]
 
-        data = np.fromstring(audiofile.raw_data, np.int16)
+        data = np.frombuffer(audiofile.raw_data, np.int16)
 
         channels = []
         for chn in range(audiofile.channels):
             channels.append(data[chn::audiofile.channels])
 
-        audiofile.frame_rate
+        frame_rate = audiofile.frame_rate
     except audioop.error:
-        _, _, audiofile = wavio.readwav(file_name)
+        wav = wavio.read(file_name)
+        data = wav.data
+        frame_rate = wav.rate
 
         if limit:
-            audiofile = audiofile[:limit * 1000]
+            data = data[: int(limit * frame_rate)]
 
-        audiofile = audiofile.T
-        audiofile = audiofile.astype(np.int16)
+        data = data.T.astype(np.int16)
 
         channels = []
-        for chn in audiofile:
+        for chn in data:
             channels.append(chn)
 
-    return channels, audiofile.frame_rate, unique_hash(file_name)
+    return channels, frame_rate, unique_hash(file_name)
 
 
 def get_audio_name_from_path(file_path: str) -> str:

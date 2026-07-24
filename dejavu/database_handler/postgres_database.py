@@ -171,22 +171,16 @@ def cursor_factory(**factory_options):
 
 
 class Cursor(object):
-    """
-    Establishes a connection to the database and returns an open cursor.
-    # Use as context manager
-    with Cursor() as cur:
-        cur.execute(query)
-        ...
-    """
+    _cache = queue.Queue(maxsize=5)
+
     def __init__(self, dictionary=False, **options):
         super().__init__()
-
-        self._cache = queue.Queue(maxsize=5)
+        options.pop("buffered", None)
 
         try:
-            conn = self._cache.get_nowait()
-            # Ping the connection before using it from the cache.
-            conn.ping(True)
+            conn = Cursor._cache.get_nowait()
+            if conn.closed:
+                raise queue.Empty
         except queue.Empty:
             conn = psycopg2.connect(**options)
 
@@ -195,7 +189,12 @@ class Cursor(object):
 
     @classmethod
     def clear_cache(cls):
-        cls._cache = queue.Queue(maxsize=5)
+        while True:
+            try:
+                conn = cls._cache.get_nowait()
+                conn.close()
+            except queue.Empty:
+                break
 
     def __enter__(self):
         if self.dictionary:
@@ -205,15 +204,14 @@ class Cursor(object):
         return self.cursor
 
     def __exit__(self, extype, exvalue, traceback):
-        # if we had a PostgreSQL related error we try to rollback the cursor.
         if extype is psycopg2.DatabaseError:
-            self.cursor.rollback()
+            self.conn.rollback()
+        else:
+            self.conn.commit()
 
         self.cursor.close()
-        self.conn.commit()
 
-        # Put it back on the queue
         try:
-            self._cache.put_nowait(self.conn)
+            Cursor._cache.put_nowait(self.conn)
         except queue.Full:
             self.conn.close()
