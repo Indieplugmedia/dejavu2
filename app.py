@@ -1,3 +1,4 @@
+import base64
 import os
 import shutil
 import tempfile
@@ -6,7 +7,7 @@ from typing import Any, Optional
 from urllib.parse import parse_qs, unquote, urlparse
 
 import requests
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -14,7 +15,9 @@ from pydantic import BaseModel
 from dejavu import Dejavu
 from dejavu.logic.recognizer.file_recognizer import FileRecognizer
 
-app = FastAPI(title="Indie Plug Dejavu Fingerprint Service")
+APP_VERSION = "2026-07-25-recognize-bytes"
+
+app = FastAPI(title="Indie Plug Dejavu Fingerprint Service", version=APP_VERSION)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -117,17 +120,67 @@ def _download(url: str, dest_path: str, max_bytes: int) -> None:
                     break
 
 
-def _guess_ext(url: str) -> str:
-    path = urlparse(url).path.lower()
-    for ext in (".mp3", ".wav", ".m4a", ".flac", ".ogg", ".aac"):
+def _guess_ext(name_or_url: str) -> str:
+    path = urlparse(name_or_url).path.lower() if "://" in name_or_url else name_or_url.lower()
+    for ext in (".mp3", ".wav", ".m4a", ".flac", ".ogg", ".aac", ".webm"):
         if path.endswith(ext):
             return ext
     return ".mp3"
 
 
+def _recognize_path(tmp_path: str) -> dict:
+    djv = get_dejavu()
+    raw = djv.recognize(FileRecognizer, tmp_path) or {}
+    results = raw.get("results") or []
+    top = results[0] if results else None
+
+    if not top:
+        return {
+            "matched": False,
+            "song_id": None,
+            "confidence": 0,
+            "offset": 0,
+            "offset_seconds": 0,
+            "match_time": raw.get("total_time", 0),
+            "results": [],
+        }
+
+    song_id = top.get("song_name")
+    if isinstance(song_id, bytes):
+        song_id = song_id.decode("utf-8", errors="ignore")
+
+    confidence = top.get("input_confidence", 0) or 0
+    return {
+        "matched": True,
+        "song_id": song_id,
+        "confidence": confidence,
+        "offset": top.get("offset", 0),
+        "offset_seconds": top.get("offset_seconds", 0),
+        "match_time": raw.get("total_time", 0),
+        "hashes_matched_in_input": top.get("hashes_matched_in_input", 0),
+        "fingerprinted_confidence": top.get("fingerprinted_confidence", 0),
+        "results": results,
+    }
+
+
+@app.get("/")
+def root():
+    return {
+        "service": "Indie Plug Dejavu Fingerprint Service",
+        "version": APP_VERSION,
+        "routes": [
+            "GET /health",
+            "GET /",
+            "POST /index",
+            "POST /recognize",
+            "POST /recognize_bytes",
+        ],
+    }
+
+
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    return {"status": "ok", "version": APP_VERSION}
 
 
 @app.post("/index")
@@ -140,7 +193,7 @@ def index_song(req: IndexReq, authorization: str = Header(None)):
         _download(req.audio_url, dest, max_bytes=50_000_000)
         djv = get_dejavu()
         djv.fingerprint_file(dest, song_name=req.song_id)
-        return {"ok": True, "song_id": req.song_id}
+        return {"ok": True, "song_id": req.song_id, "version": APP_VERSION}
     except HTTPException:
         raise
     except Exception as e:
@@ -158,37 +211,7 @@ def recognize_stream(req: RecognizeReq, authorization: str = Header(None)):
     tmp.close()
     try:
         _download(req.audio_url, tmp_path, max_bytes=300_000)
-        djv = get_dejavu()
-        raw = djv.recognize(FileRecognizer, tmp_path) or {}
-        results = raw.get("results") or []
-        top = results[0] if results else None
-
-        if not top:
-            return JSONResponse(
-                content={
-                    "song_id": None,
-                    "confidence": 0,
-                    "offset": 0,
-                    "match_time": _json_safe(raw.get("total_time", 0)),
-                    "results": [],
-                }
-            )
-
-        song_id = top.get("song_name")
-        if isinstance(song_id, bytes):
-            song_id = song_id.decode("utf-8", errors="ignore")
-
-        payload = {
-            "song_id": song_id,
-            "confidence": top.get("input_confidence", 0),
-            "offset": top.get("offset", 0),
-            "offset_seconds": top.get("offset_seconds", 0),
-            "match_time": raw.get("total_time", 0),
-            "hashes_matched_in_input": top.get("hashes_matched_in_input", 0),
-            "fingerprinted_confidence": top.get("fingerprinted_confidence", 0),
-            "results": results,
-        }
-        return JSONResponse(content=_json_safe(payload))
+        return JSONResponse(content=_json_safe(_recognize_path(tmp_path)))
     except HTTPException:
         raise
     except Exception as e:
@@ -198,3 +221,61 @@ def recognize_stream(req: RecognizeReq, authorization: str = Header(None)):
             os.unlink(tmp_path)
         except OSError:
             pass
+
+
+@app.post("/recognize_bytes")
+async def recognize_bytes(
+    request: Request,
+    authorization: str = Header(None),
+):
+    require_auth(authorization)
+
+    data = b""
+    filename = "clip.mp3"
+    content_type = (request.headers.get("content-type") or "").lower()
+
+    try:
+        if "multipart/form-data" in content_type:
+            form = await request.form()
+            upload = form.get("file") or form.get("audio") or form.get("clip")
+            if upload is None:
+                raise HTTPException(
+                    status_code=400, detail="multipart field file/audio/clip required"
+                )
+            data = await upload.read()
+            filename = getattr(upload, "filename", None) or filename
+        elif "application/json" in content_type:
+            body = await request.json()
+            b64 = body.get("audio_base64") or body.get("audio_b64") or body.get("bytes")
+            if not b64:
+                raise HTTPException(status_code=400, detail="audio_base64 required")
+            if isinstance(b64, str) and "," in b64 and b64.strip().startswith("data:"):
+                b64 = b64.split(",", 1)[1]
+            data = base64.b64decode(b64)
+            filename = body.get("filename") or filename
+        else:
+            data = await request.body()
+            if not data:
+                raise HTTPException(status_code=400, detail="empty body")
+
+        if not data:
+            raise HTTPException(status_code=400, detail="no audio bytes received")
+
+        ext = _guess_ext(filename)
+        tmp = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
+        tmp_path = tmp.name
+        tmp.write(data)
+        tmp.close()
+        try:
+            payload = _recognize_path(tmp_path)
+            payload["version"] = APP_VERSION
+            return JSONResponse(content=_json_safe(payload))
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
