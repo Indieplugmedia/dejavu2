@@ -1,4 +1,3 @@
-import base64
 import os
 import shutil
 import tempfile
@@ -7,7 +6,7 @@ from typing import Any, Optional
 from urllib.parse import parse_qs, unquote, urlparse
 
 import requests
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -15,7 +14,7 @@ from pydantic import BaseModel
 from dejavu import Dejavu
 from dejavu.logic.recognizer.file_recognizer import FileRecognizer
 
-APP_VERSION = "2026-07-25-recognize-bytes"
+APP_VERSION = "2026-08-17-tune-shorter-sample"
 
 app = FastAPI(title="Indie Plug Dejavu Fingerprint Service", version=APP_VERSION)
 app.add_middleware(
@@ -36,7 +35,7 @@ def get_db_config():
         u = urlparse(database_url)
         query = parse_qs(u.query)
         sslmode = (query.get("sslmode") or [os.environ.get("DB_SSLMODE", "prefer")])[0]
-        return {
+        config = {
             "database": {
                 "host": u.hostname or "localhost",
                 "user": unquote(u.username or "postgres"),
@@ -47,18 +46,20 @@ def get_db_config():
             },
             "database_type": "postgres",
         }
-
-    return {
-        "database": {
-            "host": os.environ.get("DB_HOST") or os.environ.get("PGHOST", "localhost"),
-            "user": os.environ.get("DB_USER") or os.environ.get("PGUSER", "postgres"),
-            "password": os.environ.get("DB_PASSWORD") or os.environ.get("PGPASSWORD", ""),
-            "database": os.environ.get("DB_NAME") or os.environ.get("PGDATABASE", "dejavu"),
-            "port": int(os.environ.get("DB_PORT") or os.environ.get("PGPORT", "5432")),
-            "sslmode": os.environ.get("DB_SSLMODE", "prefer"),
-        },
-        "database_type": "postgres",
-    }
+    else:
+        config = {
+            "database": {
+                "host": os.environ.get("DB_HOST") or os.environ.get("PGHOST", "localhost"),
+                "user": os.environ.get("DB_USER") or os.environ.get("PGUSER", "postgres"),
+                "password": os.environ.get("DB_PASSWORD") or os.environ.get("PGPASSWORD", ""),
+                "database": os.environ.get("DB_NAME") or os.environ.get("PGDATABASE", "dejavu"),
+                "port": int(os.environ.get("DB_PORT") or os.environ.get("PGPORT", "5432")),
+                "sslmode": os.environ.get("DB_SSLMODE", "prefer"),
+            },
+            "database_type": "postgres",
+        }
+    config["fingerprint_limit"] = 20
+    return config
 
 
 def get_dejavu() -> Dejavu:
@@ -168,6 +169,8 @@ def root():
     return {
         "service": "Indie Plug Dejavu Fingerprint Service",
         "version": APP_VERSION,
+        "fingerprint_limit": 20,
+        "recognize_sample_bytes": 130000,
         "routes": [
             "GET /health",
             "GET /",
@@ -191,8 +194,7 @@ def index_song(req: IndexReq, authorization: str = Header(None)):
         ext = _guess_ext(req.audio_url)
         dest = os.path.join(workdir, f"{req.song_id}{ext}")
         _download(req.audio_url, dest, max_bytes=50_000_000)
-        djv = get_dejavu()
-        djv.fingerprint_file(dest, song_name=req.song_id)
+        get_dejavu().fingerprint_file(dest, song_name=req.song_id)
         return {"ok": True, "song_id": req.song_id, "version": APP_VERSION}
     except HTTPException:
         raise
@@ -210,8 +212,10 @@ def recognize_stream(req: RecognizeReq, authorization: str = Header(None)):
     tmp_path = tmp.name
     tmp.close()
     try:
-        _download(req.audio_url, tmp_path, max_bytes=300_000)
-        return JSONResponse(content=_json_safe(_recognize_path(tmp_path)))
+        _download(req.audio_url, tmp_path, max_bytes=130_000)
+        payload = _recognize_path(tmp_path)
+        payload["version"] = APP_VERSION
+        return JSONResponse(content=_json_safe(payload))
     except HTTPException:
         raise
     except Exception as e:
@@ -224,58 +228,25 @@ def recognize_stream(req: RecognizeReq, authorization: str = Header(None)):
 
 
 @app.post("/recognize_bytes")
-async def recognize_bytes(
-    request: Request,
-    authorization: str = Header(None),
-):
+def recognize_bytes(file: UploadFile = File(...), authorization: str = Header(None)):
     require_auth(authorization)
-
-    data = b""
-    filename = "clip.mp3"
-    content_type = (request.headers.get("content-type") or "").lower()
-
+    filename = file.filename or "clip.mp3"
+    ext = _guess_ext(filename)
+    tmp = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
+    tmp_path = tmp.name
+    tmp.close()
     try:
-        if "multipart/form-data" in content_type:
-            form = await request.form()
-            upload = form.get("file") or form.get("audio") or form.get("clip")
-            if upload is None:
-                raise HTTPException(
-                    status_code=400, detail="multipart field file/audio/clip required"
-                )
-            data = await upload.read()
-            filename = getattr(upload, "filename", None) or filename
-        elif "application/json" in content_type:
-            body = await request.json()
-            b64 = body.get("audio_base64") or body.get("audio_b64") or body.get("bytes")
-            if not b64:
-                raise HTTPException(status_code=400, detail="audio_base64 required")
-            if isinstance(b64, str) and "," in b64 and b64.strip().startswith("data:"):
-                b64 = b64.split(",", 1)[1]
-            data = base64.b64decode(b64)
-            filename = body.get("filename") or filename
-        else:
-            data = await request.body()
-            if not data:
-                raise HTTPException(status_code=400, detail="empty body")
-
-        if not data:
-            raise HTTPException(status_code=400, detail="no audio bytes received")
-
-        ext = _guess_ext(filename)
-        tmp = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
-        tmp_path = tmp.name
-        tmp.write(data)
-        tmp.close()
-        try:
-            payload = _recognize_path(tmp_path)
-            payload["version"] = APP_VERSION
-            return JSONResponse(content=_json_safe(payload))
-        finally:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
+        with open(tmp_path, "wb") as f:
+            shutil.copyfileobj(file.file, f)
+        payload = _recognize_path(tmp_path)
+        payload["version"] = APP_VERSION
+        return JSONResponse(content=_json_safe(payload))
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
