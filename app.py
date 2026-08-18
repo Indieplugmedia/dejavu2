@@ -14,7 +14,7 @@ from pydantic import BaseModel
 from dejavu import Dejavu
 from dejavu.logic.recognizer.file_recognizer import FileRecognizer
 
-APP_VERSION = "2026-08-17-tune-shorter-sample"
+APP_VERSION = "2026-08-18-full-song-30s-sample"
 
 app = FastAPI(title="Indie Plug Dejavu Fingerprint Service", version=APP_VERSION)
 app.add_middleware(
@@ -58,7 +58,7 @@ def get_db_config():
             },
             "database_type": "postgres",
         }
-    config["fingerprint_limit"] = 20
+    config["fingerprint_limit"] = 0
     return config
 
 
@@ -169,8 +169,8 @@ def root():
     return {
         "service": "Indie Plug Dejavu Fingerprint Service",
         "version": APP_VERSION,
-        "fingerprint_limit": 20,
-        "recognize_sample_bytes": 130000,
+        "fingerprint_limit": 0,
+        "recognize_sample_bytes": 500000,
         "routes": [
             "GET /health",
             "GET /",
@@ -212,7 +212,7 @@ def recognize_stream(req: RecognizeReq, authorization: str = Header(None)):
     tmp_path = tmp.name
     tmp.close()
     try:
-        _download(req.audio_url, tmp_path, max_bytes=130_000)
+        _download(req.audio_url, tmp_path, max_bytes=500_000)
         payload = _recognize_path(tmp_path)
         payload["version"] = APP_VERSION
         return JSONResponse(content=_json_safe(payload))
