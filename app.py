@@ -12,9 +12,10 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from dejavu import Dejavu
+from dejavu.config.settings import FIELD_FILE_SHA1, SONG_ID, SONG_NAME
 from dejavu.logic.recognizer.file_recognizer import FileRecognizer
 
-APP_VERSION = "2026-08-18-full-song-30s-sample"
+APP_VERSION = "2026-08-19-delete-reindex"
 
 app = FastAPI(title="Indie Plug Dejavu Fingerprint Service", version=APP_VERSION)
 app.add_middleware(
@@ -105,6 +106,10 @@ class RecognizeReq(BaseModel):
     audio_url: str
 
 
+class DeleteReq(BaseModel):
+    song_id: str
+
+
 def _download(url: str, dest_path: str, max_bytes: int) -> None:
     with requests.get(
         url, stream=True, timeout=60, headers={"User-Agent": "IndiePlugDejavu/1.0"}
@@ -176,6 +181,7 @@ def root():
             "GET /",
             "POST /index",
             "POST /recognize",
+            "POST /delete",
             "POST /recognize_bytes",
         ],
     }
@@ -225,6 +231,43 @@ def recognize_stream(req: RecognizeReq, authorization: str = Header(None)):
             os.unlink(tmp_path)
         except OSError:
             pass
+
+
+@app.post("/delete")
+def delete_song(req: DeleteReq, authorization: str = Header(None)):
+    require_auth(authorization)
+    song_id = (req.song_id or "").strip()
+    if not song_id:
+        raise HTTPException(status_code=400, detail="song_id required")
+    try:
+        djv = get_dejavu()
+        db_ids = []
+        for song in djv.get_fingerprinted_songs() or []:
+            name = song.get(SONG_NAME)
+            if isinstance(name, bytes):
+                name = name.decode("utf-8", errors="ignore")
+            if str(name) == song_id:
+                db_ids.append(song.get(SONG_ID))
+        if db_ids:
+            djv.delete_songs_by_id(db_ids)
+            djv.songs = djv.get_fingerprinted_songs()
+            djv.songhashes_set = set()
+            for song in djv.songs or []:
+                sha = song.get(FIELD_FILE_SHA1)
+                if isinstance(sha, bytes):
+                    sha = sha.decode("utf-8", errors="ignore")
+                if sha:
+                    djv.songhashes_set.add(sha)
+        return {
+            "ok": True,
+            "song_id": song_id,
+            "deleted": len(db_ids),
+            "version": APP_VERSION,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.post("/recognize_bytes")

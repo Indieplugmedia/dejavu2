@@ -20,7 +20,7 @@ RUN pip install --no-cache-dir --upgrade pip \
 ENV PORT=8000
 ENV MPLBACKEND=Agg
 ENV PYTHONUNBUFFERED=1
-ENV APP_BUILD=2026-08-18-full-song-30s-sample
+ENV APP_BUILD=2026-08-19-delete-reindex
 EXPOSE 8000
 
 CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port ${PORT:-8000}"]
