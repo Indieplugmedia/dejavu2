@@ -12,10 +12,10 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from dejavu import Dejavu
-from dejavu.config.settings import FIELD_FILE_SHA1, SONG_ID, SONG_NAME
+from dejavu.config.settings import FIELD_FILE_SHA1, FIELD_TOTAL_HASHES, SONG_ID, SONG_NAME
 from dejavu.logic.recognizer.file_recognizer import FileRecognizer
 
-APP_VERSION = "2026-08-19-delete-reindex"
+APP_VERSION = "2026-08-20-stats"
 
 app = FastAPI(title="Indie Plug Dejavu Fingerprint Service", version=APP_VERSION)
 app.add_middleware(
@@ -179,6 +179,7 @@ def root():
         "routes": [
             "GET /health",
             "GET /",
+            "GET /stats",
             "POST /index",
             "POST /recognize",
             "POST /delete",
@@ -190,6 +191,29 @@ def root():
 @app.get("/health")
 def health():
     return {"status": "ok", "version": APP_VERSION}
+
+
+@app.get("/stats")
+def stats(authorization: str = Header(None)):
+    require_auth(authorization)
+    try:
+        djv = get_dejavu()
+        songs = []
+        for song in djv.get_fingerprinted_songs() or []:
+            name = song.get(SONG_NAME)
+            if isinstance(name, bytes):
+                name = name.decode("utf-8", errors="ignore")
+            hashes = song.get(FIELD_TOTAL_HASHES) or 0
+            songs.append({
+                "song_id": name,
+                "num_fingerprints": int(hashes),
+            })
+        songs.sort(key=lambda s: s["num_fingerprints"])
+        return {"songs": songs, "total": len(songs), "version": APP_VERSION}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.post("/index")
